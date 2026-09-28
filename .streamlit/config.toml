@@ -1,0 +1,12 @@
+# Streamlit 主题配置：浅色
+# 注意：此文件需与 streamlit 启动的工作目录匹配才会自动生效；
+# 项目根与 src/frontend 各放一份，确保从任一目录启动都是浅色。
+[theme]
+base = "light"
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+
+[server]
+headless = true
