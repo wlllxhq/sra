@@ -1,0 +1,10 @@
+# Streamlit 主题配置：浅色（备份位：若从 src/frontend 目录启动 streamlit，读这份）
+[theme]
+base = "light"
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+
+[server]
+headless = true
