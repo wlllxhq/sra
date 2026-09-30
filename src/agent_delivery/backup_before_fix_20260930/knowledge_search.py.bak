@@ -1,0 +1,73 @@
+"""
+工具: knowledge_search（知识库检索）
+====================================
+在论文知识库中检索相关段落，返回top_k条最相关的文档片段。
+对应后端 /api/search 接口，但直接调用RAGPipeline.search()避免HTTP回环。
+"""
+from .base_tool import ToolBase, ToolResult
+
+
+class KnowledgeSearchTool(ToolBase):
+    """知识库检索工具"""
+
+    def __init__(self, rag_pipeline=None):
+        self._rag_pipeline = rag_pipeline
+
+    @property
+    def name(self) -> str:
+        return "knowledge_search"
+
+    @property
+    def description(self) -> str:
+        return "在论文知识库中检索与查询最相关的文档段落，返回引用来源（文件名、页码、内容）"
+
+    @property
+    def parameters(self) -> dict[str, str]:
+        return {
+            "query": "检索查询文本",
+            "top_k": "返回条数，默认3，最大10",
+        }
+
+    def execute(self, query: str = "", top_k: int = 3, **kwargs) -> ToolResult:
+        if not query:
+            return ToolResult(success=False, error="缺少query参数")
+
+        if self._rag_pipeline is None:
+            return ToolResult(success=False, error="RAGPipeline未初始化")
+
+        # 直接调用模块二的search方法（避免HTTP回环，交接说明红线5）
+        results = self._rag_pipeline.search(query, top_k=min(top_k, 10))
+
+        if not results:
+            return ToolResult(
+                success=True,
+                content=f"未检索到与「{query}」相关的内容",
+                detail="检索结果为空",
+            )
+
+        # 构建摘要（供observation展示）
+        summary_parts = []
+        detail_parts = []
+        for i, r in enumerate(results, 1):
+            source = r.get("source", "未知")
+            filename = source.split("\\")[-1].split("/")[-1] if source else "未知"
+            page = r.get("page", "?")
+            content = r.get("content", "")
+            score = r.get("rrf_score", r.get("score", 0))
+
+            summary_parts.append(f"[{i}] {filename} 第{page}页 (相关度{score:.3f})")
+            detail_parts.append(
+                f"[{i}] 文档: {filename}, 页码: {page}, 相关度: {score:.4f}\n"
+                f"内容: {content[:300]}"
+            )
+
+        return ToolResult(
+            success=True,
+            content=f"检索到{len(results)}条相关段落: " + "; ".join(summary_parts),
+            detail="\n\n".join(detail_parts),
+            metadata={
+                "results": results,
+                "count": len(results),
+                "query": query,
+            },
+        )

@@ -1,0 +1,561 @@
+"""
+ReAct核心循环（手写实现）
+=========================
+实现Reasoning + Acting的迭代推理框架。
+
+核心流程:
+    1. Thought: 分析当前状态，决定下一步行动
+    2. Action: 调用工具执行操作
+    3. Observation: 观察工具返回结果
+    4. 循环直到生成最终答案或达到最大轮次
+
+SSE事件输出:
+    - thought: Agent的思考过程
+    - action: 工具调用（tool名+参数）
+    - observation: 工具返回结果
+    - chunk: 最终回答的文本块
+    - done: 完成信号（必须）
+    - error: 错误信号（必须）
+"""
+import json
+import re
+import time
+from typing import Generator
+
+from loguru import logger
+
+from .memory import MemoryManager
+from .tools import ToolBase, get_tool
+
+
+# ReAct系统提示词模板
+REACT_SYSTEM_PROMPT = """你是一个智能科研助理，能够使用工具帮助用户解决学术问题。
+
+## 工作原则
+
+1. **先思考后行动**: 每次行动前必须先输出Thought，分析当前状态和下一步计划
+2. **工具调用**: 需要信息时使用工具检索或计算，不要凭空编造
+3. **逐步推理**: 复杂问题拆解为多步骤，每步使用合适的工具
+4. **引用来源**: 回答中标注引用来源 [文档名, 页码]
+5. **最终回答**: 信息充足时输出完整的最终回答，不要使用工具
+
+## 可用工具
+
+{tool_descriptions}
+
+## 输出格式
+
+每一轮输出必须严格按以下格式：
+
+```
+Thought: [你的思考过程，分析当前状态和下一步行动]
+Action: [工具名称]
+Args: {{"参数名": "参数值"}}
+```
+
+当信息充足、可以给出最终回答时，输出：
+
+```
+Thought: [总结思考过程]
+Final Answer: [完整的最终回答，包含引用标注]
+```
+
+## 示例
+
+用户问："这篇论文用了什么方法？"
+
+```
+Thought: 用户询问论文的方法，我需要先在知识库中检索相关内容
+Action: knowledge_search
+Args: {{"query": "论文 方法 技术", "top_k": 5}}
+```
+
+（工具返回结果后）
+
+```
+Thought: 检索到了3条相关段落，来自paper.pdf第3-5页，包含了方法的详细描述。信息充足，可以回答用户。
+Final Answer: 这篇论文采用了**注意力机制**的方法[来源: paper.pdf, 第3页]，主要包括...
+```
+
+## 会话上下文
+
+{context}
+"""
+
+
+class ReActLoop:
+    """
+    ReAct核心循环
+
+    属性:
+        max_rounds: 最大推理轮次（防止死循环）
+        llm_client: OpenAI兼容的LLM客户端
+        model: 模型名称
+    """
+
+    def __init__(self, llm_client, model: str, memory_manager: MemoryManager,
+                 max_rounds: int = 5):
+        """
+        Args:
+            llm_client: OpenAI客户端实例
+            model: 模型名称（如Qwen/Qwen2.5-7B-Instruct）
+            memory_manager: 记忆管理器
+            max_rounds: 最大推理轮次，默认5
+        """
+        self.llm_client = llm_client
+        self.model = model
+        self.memory_manager = memory_manager
+        self.max_rounds = max_rounds
+
+        # 统计信息
+        self.stats = {
+            "total_runs": 0,
+            "total_rounds": 0,
+            "total_tool_calls": 0,
+            "tool_success_count": 0,
+            "tool_fail_count": 0,
+            "tool_call_counts": {},   # 每个工具的调用次数
+            "tool_token_counts": {},  # 按工具归集的Token消耗（累计，作业5.4.2）
+            "tool_time_ms": {},       # 按工具累计执行耗时（毫秒）
+            "total_llm_tokens": 0,    # 全部LLM轮次Token累计（含未归属工具的生成轮）
+        }
+
+    def _build_system_prompt(self, session_id: str, tool_descriptions: str) -> str:
+        """构建系统提示词（注入工具列表和会话上下文）"""
+        context = self.memory_manager.get_context_prompt(session_id)
+        return REACT_SYSTEM_PROMPT.format(
+            tool_descriptions=tool_descriptions,
+            context=context,
+        )
+
+    def _parse_llm_output(self, text: str) -> dict:
+        """
+        解析LLM输出，提取Thought/Action/Args/Final Answer
+
+        Returns:
+            dict: {
+                "type": "action" | "final",
+                "thought": str,
+                "action": str (工具名),
+                "args": dict,
+                "final_answer": str,
+            }
+        """
+        result = {
+            "type": "unknown",
+            "thought": "",
+            "action": "",
+            "args": {},
+            "final_answer": "",
+        }
+
+        # 提取Thought
+        thought_match = re.search(r'Thought:\s*(.*?)(?=\n(?:Action|Final Answer):|$)',
+                                   text, re.DOTALL)
+        if thought_match:
+            result["thought"] = thought_match.group(1).strip()
+
+        # 检查是否有Final Answer
+        final_match = re.search(r'Final Answer:\s*(.*)', text, re.DOTALL)
+        if final_match:
+            result["type"] = "final"
+            result["final_answer"] = final_match.group(1).strip()
+            return result
+
+        # 提取Action和Args
+        action_match = re.search(r'Action:\s*(\w+)', text)
+        if action_match:
+            result["type"] = "action"
+            result["action"] = action_match.group(1).strip()
+
+            # 提取Args（JSON格式）
+            args_match = re.search(r'Args:\s*(\{.*?\})', text, re.DOTALL)
+            if args_match:
+                try:
+                    result["args"] = json.loads(args_match.group(1))
+                except json.JSONDecodeError:
+                    logger.warning(f"Args JSON解析失败: {args_match.group(1)[:100]}")
+                    result["args"] = {}
+
+        return result
+
+    @staticmethod
+    def _reference_location(ref: dict) -> tuple[str, int]:
+        """返回稳定的“文档名 + 页码”引用键，兼容 Windows/POSIX 路径。"""
+        source = str(ref.get("filename") or ref.get("source") or "")
+        filename = source.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+        try:
+            page = int(ref.get("page", 0) or 0)
+        except (TypeError, ValueError):
+            page = 0
+        return filename, page
+
+    @classmethod
+    def _deduplicate_references(cls, references: list[dict]) -> list[dict]:
+        """按 chunk_id 或“文档名 + 页码”去重，并保留信息更完整的版本。"""
+        unique: list[dict] = []
+        chunk_to_index: dict[str, int] = {}
+        location_to_index: dict[tuple[str, int], int] = {}
+
+        for ref in references:
+            candidate = dict(ref)
+            chunk_id = str(candidate.get("chunk_id") or "").strip()
+            location = cls._reference_location(candidate)
+
+            existing_index = None
+            if chunk_id and chunk_id in chunk_to_index:
+                existing_index = chunk_to_index[chunk_id]
+            elif location[0] and location in location_to_index:
+                existing_index = location_to_index[location]
+
+            if existing_index is None:
+                existing_index = len(unique)
+                unique.append(candidate)
+            else:
+                existing = unique[existing_index]
+                if not existing.get("content") and candidate.get("content"):
+                    existing["content"] = candidate["content"]
+                if float(candidate.get("score", 0) or 0) > float(existing.get("score", 0) or 0):
+                    existing["score"] = candidate["score"]
+                if not existing.get("source") and candidate.get("source"):
+                    existing["source"] = candidate["source"]
+                if not existing.get("filename") and candidate.get("filename"):
+                    existing["filename"] = candidate["filename"]
+                if not existing.get("chunk_id") and chunk_id:
+                    existing["chunk_id"] = chunk_id
+
+            if chunk_id:
+                chunk_to_index[chunk_id] = existing_index
+            if location[0]:
+                location_to_index[location] = existing_index
+
+        return unique
+
+    def run(self, question: str, session_id: str, top_k: int,
+            tool_descriptions: str) -> Generator[dict, None, None]:
+        """
+        执行ReAct循环
+
+        Args:
+            question: 用户问题
+            session_id: 会话ID
+            top_k: 检索条数
+            tool_descriptions: 工具描述文本
+
+        Yields:
+            dict: SSE事件（type: thought/action/observation/chunk/done/error）
+        """
+        start_time = time.time()
+        self.stats["total_runs"] += 1
+
+        # 添加用户消息到记忆
+        self.memory_manager.add_user_message(session_id, question)
+
+        # 构建系统提示词
+        system_prompt = self._build_system_prompt(session_id, tool_descriptions)
+
+        # 构建对话历史（用于LLM调用）
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+        # 添加历史对话（从记忆管理器获取）
+        session = self.memory_manager.get_session(session_id)
+        for msg in session.messages[:-1]:  # 排除刚添加的当前问题
+            messages.append({"role": msg.role, "content": msg.content})
+
+        # 添加当前问题
+        messages.append({"role": "user", "content": question})
+
+        # 发送初始thinking事件
+        yield {
+            "type": "thinking",
+            "content": f"Agent接收任务，开始规划（最大{self.max_rounds}轮推理）..."
+        }
+
+        full_answer = ""
+        references = []
+        token_count = 0
+        rounds_used = 0
+        run_tool_tokens: dict[str, int] = {}   # 本次查询按工具归因的Token（本轮，作业5.4.2）
+
+        try:
+            for round_num in range(1, self.max_rounds + 1):
+                rounds_used = round_num
+                self.stats["total_rounds"] += 1
+                logger.info(f"[{session_id}] ReAct第{round_num}轮开始")
+
+                # 调用LLM
+                try:
+                    response = self.llm_client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=2048,
+                    )
+
+                    llm_output = response.choices[0].message.content
+                    msg = response.choices[0].message
+
+                    # 处理推理模型（DeepSeek等）：content为空时回退reasoning_content
+                    if not llm_output and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
+                        llm_output = msg.reasoning_content
+
+                    if not llm_output:
+                        yield {
+                            "type": "error",
+                            "content": "LLM返回空内容，无法继续推理",
+                        }
+                        return
+
+                    # 统计Token
+                    round_tokens = 0
+                    if response.usage:
+                        round_tokens = response.usage.total_tokens
+                        token_count += round_tokens
+
+                except Exception as e:
+                    logger.error(f"LLM调用失败: {e}")
+                    yield {
+                        "type": "error",
+                        "content": f"LLM调用失败: {str(e)}",
+                    }
+                    return
+
+                # 解析LLM输出
+                parsed = self._parse_llm_output(llm_output)
+
+                # 发送thought事件
+                if parsed["thought"]:
+                    yield {
+                        "type": "thought",
+                        "content": parsed["thought"][:500],  # 截断到500字
+                    }
+
+                # 判断是action还是final answer
+                if parsed["type"] == "final":
+                    # 最终回答
+                    full_answer = parsed["final_answer"]
+                    logger.info(f"[{session_id}] 第{round_num}轮: 生成最终回答")
+
+                    # 提取引用（从answer中解析）
+                    ref_pattern = r'\[来源:\s*([^,\]]+),\s*第(\d+|\?)页\]'
+                    ref_matches = re.findall(ref_pattern, full_answer)
+                    for doc, page in ref_matches:
+                        references.append({
+                            "source": doc,
+                            "filename": doc,
+                            "page": int(page) if page.isdigit() else 0,
+                            "content": "",
+                            "score": 0.0,
+                        })
+
+                    break
+
+                elif parsed["type"] == "action":
+                    # 工具调用
+                    tool_name = parsed["action"]
+                    tool_args = parsed["args"]
+
+                    logger.info(f"[{session_id}] 第{round_num}轮: 调用工具 {tool_name}")
+
+                    # 发送action事件
+                    yield {
+                        "type": "action",
+                        "content": f"调用工具: {tool_name}",
+                        "tool": tool_name,
+                        "args": tool_args,
+                    }
+
+                    # 统计工具调用
+                    self.stats["total_tool_calls"] += 1
+                    self.stats["tool_call_counts"][tool_name] = \
+                        self.stats["tool_call_counts"].get(tool_name, 0) + 1
+                    # 按工具归因Token（作业5.4.2）：本轮LLM推理消耗记到触发该调用的工具头上
+                    self.stats["tool_token_counts"][tool_name] = \
+                        self.stats["tool_token_counts"].get(tool_name, 0) + round_tokens
+                    run_tool_tokens[tool_name] = \
+                        run_tool_tokens.get(tool_name, 0) + round_tokens
+
+                    # 执行工具
+                    tool = get_tool(tool_name)
+                    inject_text = None  # 注入下一轮推理的完整上下文（区别于前端展示的observation摘要）
+                    _tool_t0 = time.perf_counter()
+                    if tool is None:
+                        observation_text = f"错误: 未找到工具 '{tool_name}'"
+                        self.stats["tool_fail_count"] += 1
+                        logger.warning(observation_text)
+                    else:
+                        result = tool.safe_execute(**tool_args)
+                        # 工具执行耗时（毫秒）按工具累计
+                        _tool_ms = int((time.perf_counter() - _tool_t0) * 1000)
+                        self.stats["tool_time_ms"][tool_name] = \
+                            self.stats["tool_time_ms"].get(tool_name, 0) + _tool_ms
+                        observation_text = result.to_observation_text()
+                        # 修复"盲答"：模型上下文注入 detail 正文（原仅注入300字截断摘要，检索内容不进模型）
+                        if result.success and result.detail:
+                            inject_text = f"{result.content}\n\n{result.detail}"
+
+                        if result.success:
+                            self.stats["tool_success_count"] += 1
+
+                            # 如果工具返回了references，收集起来
+                            if "references" in result.metadata:
+                                for ref in result.metadata["references"][:5]:
+                                    references.append({
+                                        "chunk_id": ref.get("chunk_id", ""),
+                                        "source": ref.get("source", ""),
+                                        "filename": ref.get("source", "").split("\\")[-1].split("/")[-1],
+                                        "page": ref.get("page", 0),
+                                        "content": ref.get("content", "")[:200],
+                                        "score": ref.get("rrf_score", ref.get("score", 0)),
+                                    })
+
+                            # 如果工具返回了answer（如knowledge_qa），直接使用
+                            if "answer" in result.metadata and round_num == self.max_rounds:
+                                full_answer = result.metadata["answer"]
+                                logger.info(f"[{session_id}] 工具直接返回答案，提前结束")
+                                break
+                        else:
+                            self.stats["tool_fail_count"] += 1
+                            logger.warning(f"工具 {tool_name} 执行失败: {result.error}")
+
+                    # 发送observation事件
+                    yield {
+                        "type": "observation",
+                        "content": observation_text[:300],
+                        "tool": tool_name,
+                    }
+
+                    # 将工具调用结果添加到对话历史（供下一轮推理使用）
+                    # 修复"盲答"：优先注入含 detail 正文的 inject_text（上限3000字控Token），
+                    # 展示给前端的 observation 仍是300字摘要，两者互不影响
+                    model_context = (inject_text or observation_text)[:3000]
+                    messages.append({"role": "assistant", "content": llm_output})
+                    messages.append({
+                        "role": "user",  # 工具观察结果以user角色注入
+                        "content": f"工具 {tool_name} 返回结果:\n{model_context}\n\n请继续推理或给出最终回答。",
+                    })
+
+                else:
+                    # 未知类型，继续下一轮
+                    logger.warning(f"[{session_id}] 第{round_num}轮: 未知输出类型")
+                    messages.append({"role": "assistant", "content": llm_output})
+
+            else:
+                # 达到最大轮次，强制生成最终回答
+                logger.warning(f"[{session_id}] 达到最大轮次{self.max_rounds}，强制生成回答")
+
+                force_prompt = "请基于以上对话，直接给出最终回答（使用Final Answer格式），不要再调用工具。"
+                messages.append({"role": "user", "content": force_prompt})
+
+                try:
+                    response = self.llm_client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=2048,
+                    )
+
+                    final_output = response.choices[0].message.content
+                    msg = response.choices[0].message
+
+                    if not final_output and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
+                        final_output = msg.reasoning_content
+
+                    if final_output:
+                        # 提取Final Answer部分
+                        final_match = re.search(r'Final Answer:\s*(.*)', final_output, re.DOTALL)
+                        if final_match:
+                            full_answer = final_match.group(1).strip()
+                        else:
+                            full_answer = final_output
+
+                        if response.usage:
+                            token_count += response.usage.total_tokens
+
+                except Exception as e:
+                    logger.error(f"强制生成回答失败: {e}")
+                    yield {
+                        "type": "error",
+                        "content": f"达到最大推理轮次且生成最终回答失败: {str(e)}",
+                    }
+                    return
+
+            references = self._deduplicate_references(references)
+
+            # 发送引用事件
+            for i, ref in enumerate(references, 1):
+                yield {
+                    "type": "reference",
+                    "content": ref.get("content", "")[:100],
+                    "ref_index": i,
+                    "doc": ref.get("filename", "未知"),
+                    "page": ref.get("page", 0),
+                    "score": ref.get("score", 0),
+                }
+
+            # 分块输出最终回答（模拟打字机效果）
+            if full_answer:
+                chunk_size = 20
+                for i in range(0, len(full_answer), chunk_size):
+                    yield {
+                        "type": "chunk",
+                        "content": full_answer[i:i+chunk_size],
+                    }
+
+            # 添加到记忆
+            if full_answer:
+                self.memory_manager.add_assistant_message(
+                    session_id, full_answer,
+                    metadata={"references": references, "token_count": token_count}
+                )
+
+            # 发送done事件（必须！）
+            elapsed_time = time.time() - start_time
+            self.stats["total_llm_tokens"] += token_count
+            yield {
+                "type": "done",
+                "content": full_answer,
+                "reference_count": len(references),
+                "rounds_used": rounds_used,
+                "elapsed_time": round(elapsed_time, 2),
+                "token_count": token_count,
+                # 本轮按工具分别统计的Token消耗（作业5.4.2）；差额即生成轮Token
+                "tool_token_counts": dict(run_tool_tokens),
+            }
+
+            logger.info(
+                f"[{session_id}] ReAct完成: {rounds_used}轮, "
+                f"{len(references)}条引用, {token_count} tokens, {elapsed_time:.2f}s"
+            )
+
+        except Exception as e:
+            logger.error(f"[{session_id}] ReAct循环异常: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "content": f"Agent推理过程异常: {str(e)}",
+            }
+
+    def get_stats(self) -> dict:
+        """获取ReAct统计信息"""
+        avg_rounds = (
+            self.stats["total_rounds"] / max(1, self.stats["total_runs"])
+        )
+        tool_success_rate = (
+            self.stats["tool_success_count"] / max(1, self.stats["total_tool_calls"])
+        )
+        # 按工具平均耗时（ms）= 累计耗时 / 调用次数
+        tool_avg_time_ms = {
+            t: round(ms / max(1, self.stats["tool_call_counts"].get(t, 1)), 1)
+            for t, ms in self.stats["tool_time_ms"].items()
+        }
+
+        return {
+            **self.stats,
+            "avg_rounds_per_query": round(avg_rounds, 2),
+            # 保留旧字段，避免已接入客户端发生兼容性问题。
+            "avg_rounds_per_session": round(avg_rounds, 2),
+            "tool_success_rate": round(tool_success_rate, 4),
+            "tool_avg_time_ms": tool_avg_time_ms,
+        }

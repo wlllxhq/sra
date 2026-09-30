@@ -1,0 +1,149 @@
+"""
+FastAPI应用工厂
+创建并配置FastAPI应用实例
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
+
+
+def create_app() -> FastAPI:
+    """
+    创建FastAPI应用
+
+    初始化流程：
+    1. 创建FastAPI实例
+    2. 配置中间件（CORS等）
+    3. 注册路由
+    4. 初始化各服务模块
+    """
+    app = FastAPI(
+        title="智能科研助理 RAG API",
+        description="基于RAG+Agent的论文知识库问答系统 - 后端服务",
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
+
+    # CORS中间件（允许前端跨域访问）
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # 生产环境应限制为前端域名
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # 注册路由（模块一/二）
+    from .routes import router
+    app.include_router(router)
+
+    # 注册Agent路由（模块三）—— 新增，不改动既有路由
+    from src.agent.routes import router as agent_router
+    app.include_router(agent_router)
+
+    # 应用启动时初始化服务
+    @app.on_event("startup")
+    async def startup():
+        logger.info("========== 智能科研助理 RAG 服务启动 ==========")
+        _initialize_services()
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        logger.info("========== 服务关闭 ==========")
+
+    return app
+
+
+def _initialize_services():
+    """初始化所有服务模块"""
+    import os
+    from src.utils.config import get_config
+    from src.data_loader.base_loader import DocumentLoaderManager
+    from src.data_loader.pdf_loader import PDFLoader
+    from src.data_loader.docx_loader import DocxLoader
+    from src.data_loader.text_loader import TextLoader
+    from src.chunking.recursive_chunker import RecursiveChunker
+    from src.retrieval.vector_store import VectorStore
+    from src.retrieval.bm25_retriever import BM25Retriever
+    from src.retrieval.hybrid_retriever import HybridRetriever
+    from src.retrieval.reranker import Reranker
+    from src.generation.rag_pipeline import RAGPipeline
+    from src.generation.cache import SemanticCache
+    from .routes import init_services
+
+    config = get_config()
+
+    # 1. 文档加载器
+    loader_manager = DocumentLoaderManager()
+    loader_manager.register(PDFLoader())
+    loader_manager.register(DocxLoader())
+    loader_manager.register(TextLoader())
+    logger.info("文档加载器初始化完成: PDF, DOCX, TXT")
+
+    # 2. 文本分块器
+    chunker = RecursiveChunker(
+        chunk_size=config["DEFAULT_CHUNK_SIZE"],
+        chunk_overlap=config["DEFAULT_CHUNK_OVERLAP"],
+    )
+    logger.info(f"分块器初始化完成: chunk_size={config['DEFAULT_CHUNK_SIZE']}, "
+                f"overlap={config['DEFAULT_CHUNK_OVERLAP']}")
+
+    # 3. 向量存储
+    vector_store = VectorStore()
+
+    # 尝试加载已有索引
+    index_path = os.path.join(config["INDEX_DIR"], "vector")
+    if os.path.exists(index_path):
+        if vector_store.load(index_path):
+            logger.info(f"已加载向量索引: {vector_store.total_vectors}个向量")
+
+    # 4. BM25检索器
+    bm25 = BM25Retriever()
+
+    # 5. 混合检索器
+    hybrid_retriever = HybridRetriever(vector_store, bm25, rrf_k=config["RRF_K"])
+
+    # 6. 重排序器
+    reranker = Reranker()
+
+    # 7. 语义缓存
+    cache = SemanticCache(vector_store=vector_store)
+
+    # 8. RAG流水线
+    rag_pipeline = RAGPipeline(hybrid_retriever, reranker, cache)
+    logger.info("RAG流水线初始化完成")
+
+    # 注入到路由
+    init_services(rag_pipeline, vector_store, chunker, loader_manager)
+
+    # ===== 模块三 Agent 初始化（追加，不改动模块一/二） =====
+    # 重建BM25索引（从vector_store的chunks_meta恢复，同main.py cli_mode逻辑）
+    if vector_store.total_vectors > 0 and hasattr(vector_store, 'chunks_meta'):
+        from src.chunking.base_chunker import Chunk
+        all_chunks_for_bm25 = []
+        for meta in vector_store.chunks_meta:
+            c = Chunk(
+                content=meta["content"],
+                source=meta["source"],
+                page=meta["page"],
+                chunk_id=meta["chunk_id"],
+                chunk_index=meta["chunk_index"],
+            )
+            all_chunks_for_bm25.append(c)
+        bm25.build_index(all_chunks_for_bm25)
+        logger.info(f"BM25索引重建完成: {len(all_chunks_for_bm25)}个分块")
+
+    # 初始化Agent流水线（注入RAGPipeline + VectorStore）
+    from src.agent.agent_pipeline import init_agent_pipeline
+    agent_pipeline = init_agent_pipeline(
+        rag_pipeline=rag_pipeline,
+        vector_store=vector_store,
+    )
+
+    # 注入Agent路由
+    from src.agent.routes import init_agent_routes
+    init_agent_routes(agent_pipeline)
+
+    logger.info("Agent流水线初始化完成（模块三）")
+    logger.info("========== 所有服务初始化完成 ==========")
