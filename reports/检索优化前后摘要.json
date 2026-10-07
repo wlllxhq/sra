@@ -1,0 +1,56 @@
+{
+  "evaluation_scope": {
+    "question_count": 52,
+    "paper_count": 10,
+    "vector_count": 1013,
+    "top_k": 5,
+    "hybrid_candidate_top_k": 20,
+    "reranker": "disabled_for_controlled_comparison",
+    "external_api_used": false
+  },
+  "before": {
+    "method": "hybrid_vector_bm25_rrf",
+    "hit_at_5": 0.7885,
+    "mrr": 0.7628,
+    "recall_at_5": 0.7308,
+    "miss_count": 11,
+    "miss_question_ids": [
+      "F019",
+      "F020",
+      "C009",
+      "C010",
+      "I006",
+      "I008",
+      "I010",
+      "R006",
+      "R007",
+      "R009",
+      "R010"
+    ]
+  },
+  "after": {
+    "method": "hybrid_vector_bm25_rrf_crosslingual",
+    "configuration": {
+      "cross_language_query_expansion": true,
+      "max_chunks_per_source": 2,
+      "vector_source_reserve": 2
+    },
+    "hit_at_5": 1.0,
+    "mrr": 0.8301,
+    "recall_at_5": 0.9712,
+    "miss_count": 0,
+    "miss_question_ids": []
+  },
+  "delta": {
+    "hit_at_5": 0.2115,
+    "mrr": 0.0673,
+    "recall_at_5": 0.2404,
+    "miss_count": -11
+  },
+  "verification": {
+    "unit_tests_passed": 6,
+    "full_retest_passed": true,
+    "all_questions_have_five_results": true,
+    "top5_source_cap_verified": true
+  }
+}
