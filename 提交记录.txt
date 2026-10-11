@@ -1,0 +1,65 @@
+智能科研助理 —— Git 提交历史
+导出时间: 2026-10-11 10:46
+仓库: https://github.com/wlllxhq/sra.git
+
+== 提交列表（按时间正序）==
+d492b31 | 2026-09-28 09:30 | zhangxuan | chore: 初始化项目骨架与配置
+b88b3c1 | 2026-09-28 11:00 | zhangxuan | feat(模块一): 文档加载、分块与混合检索
+feb8c7e | 2026-09-28 16:00 | zhangxuan | feat(模块二): RAG 生成层与 FastAPI 服务
+ab3db57 | 2026-09-29 15:00 | dingyuanyang | feat(模块四): Streamlit 前端与可观测面板（模块三占位）
+eb3680c | 2026-09-30 10:00 | lirui | feat(模块三): ReAct Agent、工具集与记忆管理
+aa31661 | 2026-09-30 15:00 | dingyuanyang | feat(模块四): 接入模块三，Agent 轨迹实时可视化
+5bb2ac1 | 2026-10-07 14:00 | guanyuqi | test/docs: 测试用例、评测报告与项目文档
+53fd2dd | 2026-10-11 10:00 | guanyuqi | docs(模块五): 补充技术设计文档、用户使用手册与系统评测报告
+28b47bd | 2026-10-11 11:00 | zhangxuan | docs(模块一/二): 补充分块策略对比实验报告、检索性能基准测试报告与Prompt模板设计文档
+5f8bff3 | 2026-10-11 12:00 | guanyuqi | docs: 补充答辩演示PPT
+3bd4f2c | 2026-10-11 13:00 | guanyuqi | feat(模块五): 新增 Docker 一键部署（Dockerfile / docker-compose / .dockerignore）
+608901d | 2026-10-11 14:00 | guanyuqi | docs(模块五): 按代码修订用户使用手册并补充界面截图（含 Docker 部署说明）
+99c2e25 | 2026-10-11 14:20 | guanyuqi | fix(docs): 用户手册改为在原文基础上修订（恢复原版 + 定点修改 + 插图）
+
+== 按作者统计 ==
+     6	guanyuqi
+     4	zhangxuan
+     2	dingyuanyang
+     1	lirui
+
+== 每条提交改动规模 ==
+d492b31 2026-09-28 chore: 初始化项目骨架与配置
+ 9 files changed, 447 insertions(+)
+
+b88b3c1 2026-09-28 feat(模块一): 文档加载、分块与混合检索
+ 16 files changed, 1465 insertions(+)
+
+feb8c7e 2026-09-28 feat(模块二): RAG 生成层与 FastAPI 服务
+ 10 files changed, 1349 insertions(+)
+
+ab3db57 2026-09-29 feat(模块四): Streamlit 前端与可观测面板（模块三占位）
+ 14 files changed, 1554 insertions(+)
+
+eb3680c 2026-09-30 feat(模块三): ReAct Agent、工具集与记忆管理
+ 21 files changed, 2886 insertions(+)
+
+aa31661 2026-09-30 feat(模块四): 接入模块三，Agent 轨迹实时可视化
+ 3 files changed, 407 insertions(+)
+
+5bb2ac1 2026-10-07 test/docs: 测试用例、评测报告与项目文档
+ 12 files changed, 2114 insertions(+)
+
+53fd2dd 2026-10-11 docs(模块五): 补充技术设计文档、用户使用手册与系统评测报告
+ 3 files changed, 0 insertions(+), 0 deletions(-)
+
+28b47bd 2026-10-11 docs(模块一/二): 补充分块策略对比实验报告、检索性能基准测试报告与Prompt模板设计文档
+ 3 files changed, 0 insertions(+), 0 deletions(-)
+
+5f8bff3 2026-10-11 docs: 补充答辩演示PPT
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+3bd4f2c 2026-10-11 feat(模块五): 新增 Docker 一键部署（Dockerfile / docker-compose / .dockerignore）
+ 4 files changed, 122 insertions(+)
+
+608901d 2026-10-11 docs(模块五): 按代码修订用户使用手册并补充界面截图（含 Docker 部署说明）
+ 6 files changed, 0 insertions(+), 0 deletions(-)
+
+99c2e25 2026-10-11 fix(docs): 用户手册改为在原文基础上修订（恢复原版 + 定点修改 + 插图）
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
