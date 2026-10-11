@@ -1,0 +1,43 @@
+# =============================================================================
+# 智能科研助理 —— 一键部署（后端 API + 前端界面）
+#
+# 使用步骤：
+#   1. cp .env.example .env   并填好 SILICONFLOW_API_KEY / CHAT_MODEL / USE_AGENT
+#   2. docker compose up -d --build
+#   3. 浏览器打开 http://localhost:8501 （前端），后端文档 http://localhost:8000/docs
+#
+# 说明：两个服务共用同一镜像（Dockerfile）；数据目录挂载到宿主机，容器重建不丢。
+# =============================================================================
+services:
+  backend:
+    build: .
+    image: smart-research-assistant:latest
+    container_name: sra-backend
+    command: uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000
+    env_file: .env                       # 注入 API Key 等配置
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads           # 上传的论文，持久化
+      - ./index:/app/index               # 向量索引，持久化
+      - ./logs:/app/logs                 # 运行日志
+    restart: unless-stopped
+
+  frontend:
+    build: .
+    image: smart-research-assistant:latest
+    container_name: sra-frontend
+    command: streamlit run src/frontend/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    env_file: .env
+    environment:
+      RAG_API_BASE_URL: http://backend:8000   # 容器内用服务名访问后端（非 127.0.0.1）
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./src/frontend/sessions:/app/src/frontend/sessions   # 会话记录持久化
+    depends_on:
+      - backend
+    restart: unless-stopped

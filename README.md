@@ -128,6 +128,24 @@ streamlit run src/frontend/app.py
 
 命令行模式（不起 Web 服务，便于快速验证）：`python main.py --cli`
 
+### 5.1 一键部署（Docker）
+
+无需手动配环境，用 Docker 起后端与前端两个容器：
+
+```bash
+cp .env.example .env        # 填好 SILICONFLOW_API_KEY / CHAT_MODEL / USE_AGENT
+docker compose up -d --build
+# 前端 http://localhost:8501   后端文档 http://localhost:8000/docs
+```
+
+- `Dockerfile`：统一镜像（Python 3.10 + 依赖 + **预下载的本地模型**），后端/前端共用；
+- `docker-compose.yml`：`backend`（FastAPI，8000）+ `frontend`（Streamlit，8501）两服务，
+  `uploads/`、`index/`、`logs/`、前端会话目录均挂载到宿主机，容器重建不丢数据；
+- `.dockerignore`：排除 `.env`、`.venv`、`uploads/`、`index/` 等，避免密钥与数据进镜像。
+
+> 首次 `--build` 会安装依赖并下载约 1.3G 的 Embedding/Reranker 模型，耗时较长（走 HF 镜像）；
+> 之后启动很快。建议宿主机内存 ≥ 8G。
+
 ## 六、API 接口
 
 | 接口 | 方法 | 说明 |
